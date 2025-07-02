@@ -129,7 +129,7 @@ function start_instances() {
             --memory=6g \
             --cpus=2 \
             -e NODE_ID="$NODE_ID" \
-            -e MAX_THREADS=2 \
+            -e MAX_THREADS=1 \
             -v "$LOG_DIR":/nexus-data \
             "$IMAGE_NAME"
 
@@ -154,7 +154,7 @@ function add_one_instance() {
         --memory=6g \
         --cpus=2 \
         -e NODE_ID="$NODE_ID" \
-        -e MAX_THREADS=2 \
+        -e MAX_THREADS=1 \
         -v "$LOG_DIR":/nexus-data \
         "$IMAGE_NAME"
 
