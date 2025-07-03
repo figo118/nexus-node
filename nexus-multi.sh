@@ -126,14 +126,14 @@ function start_instances() {
 
         docker run -dit \
             --name "$CONTAINER_NAME" \
-            --memory=6g \
-            --cpus=2 \
+            --memory=2g \
+            --cpus=1 \
             -e NODE_ID="$NODE_ID" \
-            -e MAX_THREADS=2 \
+            -e MAX_THREADS=1 \
             -v "$LOG_DIR":/nexus-data \
             "$IMAGE_NAME"
 
-        echo "✅ 实例 $CONTAINER_NAME 启动成功（线程数: 2，内存限制: 6GB）"
+        echo "✅ 实例 $CONTAINER_NAME 启动成功（线程数: 1，内存限制: 2GB）"
     done
 }
 
@@ -151,14 +151,14 @@ function add_one_instance() {
 
     docker run -dit \
         --name "$CONTAINER_NAME" \
-        --memory=6g \
-        --cpus=2 \
+        --memory=2g \
+        --cpus=1 \
         -e NODE_ID="$NODE_ID" \
-        -e MAX_THREADS=2 \
+        -e MAX_THREADS=1 \
         -v "$LOG_DIR":/nexus-data \
         "$IMAGE_NAME"
 
-    echo "✅ 新实例 $CONTAINER_NAME 启动成功（线程数: 2，内存限制: 6GB）"
+    echo "✅ 新实例 $CONTAINER_NAME 启动成功（线程数: 1，内存限制: 1GB）"
 }
 
 function restart_node() {
