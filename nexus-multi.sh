@@ -62,7 +62,6 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /tmp
 RUN git clone https://github.com/nexus-xyz/nexus-cli.git
 WORKDIR /tmp/nexus-cli
-RUN git checkout v0.8.18
 
 WORKDIR /tmp/nexus-cli/clients/cli
 RUN RUST_BACKTRACE=full cargo build --release
