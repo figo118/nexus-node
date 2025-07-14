@@ -73,10 +73,16 @@ RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 EOF
 
-    cat > "$BUILD_DIR/entrypoint.sh" <<'EOF'
+cat > "$BUILD_DIR/entrypoint.sh" <<'EOF'
 #!/bin/bash
 set -e
 
+# 允许用户直接运行 nexus-network --version / --help 等命令
+if [[ "$1" == "--version" || "$1" == "--help" || "$1" == "version" || "$1" == "help" ]]; then
+    exec nexus-network "$@"
+fi
+
+# 强制要求 NODE_ID 用于运行节点
 [ -z "$NODE_ID" ] && {
     echo "❌ 必须设置 NODE_ID 环境变量" >&2
     exit 1
@@ -90,18 +96,26 @@ MAX_THREADS=${MAX_THREADS:-4}
 exec nexus-network start --node-id "$NODE_ID" --max-threads "$MAX_THREADS" 2>&1 | tee -a "$LOG_FILE"
 EOF
 
+
     chmod +x "$BUILD_DIR/entrypoint.sh"
 }
 
 function build_image() {
     cd "$BUILD_DIR"
-    echo "🔧 开始构建 Docker 镜像..."
+    echo "🔧 开始构建 Docker 镜像（已禁用缓存）..."
+
     docker build --no-cache -t "$IMAGE_NAME" . || {
         echo "❌ 镜像构建失败" >&2
         exit 1
     }
-    echo "✅ 镜像构建完成"
+
+    echo "✅ 镜像构建完成，正在检查 nexus-network 版本..."
+
+    docker run --rm --entrypoint nexus-network "$IMAGE_NAME" --version || {
+        echo "⚠️ 无法获取版本号，可能构建未成功或镜像结构有误。" >&2
+    }
 }
+
 
 function validate_node_id() {
     [[ "$1" =~ ^[0-9]+$ ]] || {
@@ -157,7 +171,7 @@ function add_one_instance() {
         -v "$LOG_DIR":/nexus-data \
         "$IMAGE_NAME"
 
-    echo "✅ 新实例 $CONTAINER_NAME 启动成功（线程数: 1，内存限制: 1GB）"
+    echo "✅ 新实例 $CONTAINER_NAME 启动成功（线程数: 1，内存限制: 2GB）"
 }
 
 function restart_node() {
@@ -257,7 +271,7 @@ function show_menu() {
     echo "📂 日志目录: $LOG_DIR"
     echo
     echo "📊 当前资源使用情况："
-    echo -e "容器\t\t节点ID\t\tCPU\t内存\t\t占用率"
+    echo -e "容器\t\t节点ID"
 
     containers=$(docker ps --filter "name=nexus-node-" --format "{{.Names}}")
     if [ -z "$containers" ]; then
@@ -265,11 +279,7 @@ function show_menu() {
     else
         for name in $containers; do
             NODE_ID=$(docker inspect "$name" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep NODE_ID= | cut -d= -f2)
-            stats=$(docker stats --no-stream --format "{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}" "$name")
-            CPU=$(echo "$stats" | cut -d'|' -f1)
-            MEM=$(echo "$stats" | cut -d'|' -f2)
-            PCT=$(echo "$stats" | cut -d'|' -f3)
-            printf "%-15s %-10s %-6s %-16s %s\n" "$name" "$NODE_ID" "$CPU" "$MEM" "$PCT"
+            printf "%-15s %-10s %-6s %-16s %s\n" "$name" "$NODE_ID"
         done
     fi
     echo
