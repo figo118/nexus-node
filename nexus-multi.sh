@@ -40,24 +40,16 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG http_proxy
 ARG https_proxy
 
-RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list && \
-    sed -i 's/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list && \
-    apt-get update && \
+RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl git build-essential pkg-config libssl-dev \
     clang libclang-dev cmake jq ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /root/.cargo && \
-    echo '[source.crates-io]' > /root/.cargo/config.toml && \
-    echo 'replace-with = "ustc"' >> /root/.cargo/config.toml && \
-    echo '[source.ustc]' >> /root/.cargo/config.toml && \
-    echo 'registry = "https://mirrors.ustc.edu.cn/crates.io-index"' >> /root/.cargo/config.toml && \
-    echo '[net]' >> /root/.cargo/config.toml && \
-    echo 'git-fetch-with-cli = true' >> /root/.cargo/config.toml && \
-    curl https://sh.rustup.rs -sSf | sh -s -- -y
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
 
 ENV PATH="/root/.cargo/bin:${PATH}"
+
 
 WORKDIR /tmp
 RUN git clone https://github.com/nexus-xyz/nexus-cli.git
