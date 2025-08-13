@@ -88,10 +88,10 @@ MAX_THREADS=${MAX_THREADS:-4}
 exec nexus-network start --node-id "$NODE_ID" --max-threads "$MAX_THREADS" 2>&1 | tee -a "$LOG_FILE"
 EOF
 
-
     chmod +x "$BUILD_DIR/entrypoint.sh"
 }
 
+# 1. 构建镜像
 function build_image() {
     cd "$BUILD_DIR"
     echo "🔧 开始构建 Docker 镜像（已禁用缓存）..."
@@ -108,7 +108,20 @@ function build_image() {
     }
 }
 
+# 7. 更新到官方最新版
+function build_image_latest() {
+    cd "$BUILD_DIR"
+    echo "🔧 正在更新到官方最新版（使用本地缓存，不重新拉取 Ubuntu 24.04）..."
+    docker build -t "$IMAGE_NAME" . || {
+        echo "❌ 镜像构建失败" >&2
+        exit 1
+    }
+    echo "✅ 镜像更新完成，当前版本："
+    docker run --rm --entrypoint nexus-network "$IMAGE_NAME" --version
+}
 
+# 其他功能
+# 校验 node-id
 function validate_node_id() {
     [[ "$1" =~ ^[0-9]+$ ]] || {
         echo "❌ node-id 必须是数字" >&2
@@ -116,6 +129,8 @@ function validate_node_id() {
     }
     return 0
 }
+
+# 启动多个实例
 function start_instances() {
     read -rp "请输入要创建的实例数量: " INSTANCE_COUNT
     [[ "$INSTANCE_COUNT" =~ ^[0-9]+$ ]] || { echo "❌ 请输入有效数字" >&2; exit 1; }
@@ -142,6 +157,7 @@ function start_instances() {
     done
 }
 
+# 添加单个实例
 function add_one_instance() {
     NEXT_IDX=$(docker ps -a --filter "name=nexus-node-" --format '{{.Names}}' | sed 's/nexus-node-//' | sort -n | tail -1 | awk '{print $1+1}')
     [ -z "$NEXT_IDX" ] && NEXT_IDX=1
@@ -166,6 +182,7 @@ function add_one_instance() {
     echo "✅ 新实例 $CONTAINER_NAME 启动成功（线程数: 1，内存限制: 2GB）"
 }
 
+# 重启节点
 function restart_node() {
     containers=($(docker ps --filter "name=nexus-node-" --format "{{.Names}}"))
     if [ ${#containers[@]} -eq 0 ]; then
@@ -210,6 +227,7 @@ function restart_node() {
     read -rp "按 Enter 继续..."
 }
 
+# 查看日志
 function show_container_logs() {
     while true; do
         clear
@@ -257,6 +275,7 @@ function show_container_logs() {
     done
 }
 
+# 显示菜单
 function show_menu() {
     clear
     echo "========== Nexus 节点管理 ==========="
@@ -281,10 +300,10 @@ function show_menu() {
     echo "4. 查看实时日志"
     echo "5. 重启节点"
     echo "6. 添加单个实例"
+    echo "7. 更新到官方最新版（跳过初始安装步骤）"
     echo "0. 退出"
     echo "======================================"
 }
-
 
 # ========== 主程序 ==========
 check_docker
@@ -300,6 +319,7 @@ while true; do
         4) show_container_logs;;
         5) restart_node;;
         6) add_one_instance ;;
+        7) prepare_build_files; build_image_latest ;;
         0) echo "退出"; exit 0;;
         *) echo "无效选项";;
     esac
