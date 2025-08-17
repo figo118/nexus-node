@@ -140,39 +140,46 @@ function start_instances() {
             validate_node_id "$NODE_ID" && break
         done
 
+        # ✅ 新增冲突检查
+        if docker inspect "nexus-node-$i" &>/dev/null; then
+            echo "⚠️ 容器 nexus-node-$i 已存在，正在删除..."
+            docker rm -f "nexus-node-$i"
+        fi
+
         docker run -dit \
             --name "nexus-node-$i" \
             -e NODE_ID="$NODE_ID" \
             -v "$LOG_DIR":/nexus-data \
             "$IMAGE_NAME" \
-            start --node-id "$NODE_ID" $NEXUS_START_FLAGS
-        echo "✅ 实例 nexus-node-$i 启动成功（线程数:$DEFAULT_THREADS）"
+            start --node-id "$NODE_ID" --max-threads 8 --headless
+        echo "✅ 实例 nexus-node-$i 启动成功"
     done
 }
 
 function add_one_instance() {
+    # 自动计算下一个可用编号（避免冲突）
+    NEXT_IDX=$(($(docker ps -aq --filter "name=nexus-node-" --format "{{.Names}}" | sed 's/nexus-node-//' | sort -n | tail -1) + 1))
+    [ -z "$NEXT_IDX" ] && NEXT_IDX=1  # 若没有现存实例，从1开始
+
     while true; do
-        read -rp "请输入 node-id: " NODE_ID
-        validate_node_id "$NODE_ID" && break
+        read -rp "请输入 node-id (必须为数字): " NODE_ID
+        [[ "$NODE_ID" =~ ^[0-9]+$ ]] && break
+        echo "❌ node-id 必须是数字！"
     done
 
-    NEXT_IDX=$(($(docker ps -aq --filter "name=nexus-node-" | wc -l) + 1))
-    CONTAINER_NAME="nexus-node-$NEXT_IDX"
+    # 强制清理可能存在的同名容器
+    docker rm -f "nexus-node-$NEXT_IDX" 2>/dev/null || true
 
-    if docker inspect "$CONTAINER_NAME" &>/dev/null; then
-        echo "⚠️ 容器名 $CONTAINER_NAME 已存在，自动跳过"
-        return 1
-    fi
-
+    # 启动实例（固定线程数8和无头模式）
     docker run -dit \
-        --name "$CONTAINER_NAME" \
+        --name "nexus-node-$NEXT_IDX" \
         -e NODE_ID="$NODE_ID" \
         -v "$LOG_DIR":/nexus-data \
         "$IMAGE_NAME" \
-        start --node-id "$NODE_ID" $NEXUS_START_FLAGS
-    echo "✅ 实例 $CONTAINER_NAME 启动成功（线程数:$DEFAULT_THREADS）"
-}
+        start --node-id "$NODE_ID" --max-threads 8 --headless
 
+    echo "✅ 实例 nexus-node-$NEXT_IDX 启动成功（线程数:8）"
+}
 function restart_node() {
     containers=()
     while IFS= read -r line; do
