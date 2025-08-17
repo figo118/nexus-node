@@ -1,21 +1,26 @@
 #!/bin/bash
 set -e
 
-# ✅ 检查是否安装 jq
-command -v jq >/dev/null 2>&1 || {
-    echo "❌ 缺少 jq 命令，请先安装：sudo apt install -y jq" >&2
-    exit 1
-}
-
+# ✅ 全局配置变量
+DEFAULT_THREADS=8
+NEXUS_START_FLAGS="--headless --max-threads $DEFAULT_THREADS"
 BASE_DIR="/root/nexus-node"
 IMAGE_NAME="nexus-node:latest"
 BUILD_DIR="$BASE_DIR/build"
 LOG_DIR="$BASE_DIR/logs"
 CONFIG_DIR="$BASE_DIR/config"
 
+# ✅ 检查是否安装 jq
+command -v jq >/dev/null 2>&1 || {
+    echo "❌ 缺少 jq 命令，请先安装：sudo apt install -y jq" >&2
+    exit 1
+}
+
+# ✅ 优化目录权限
 function init_dirs() {
     mkdir -p "$BUILD_DIR" "$LOG_DIR" "$CONFIG_DIR"
-    chmod 777 "$LOG_DIR"
+    chmod 755 "$LOG_DIR"
+    sudo chown -R $USER:$USER "$BASE_DIR" 2>/dev/null || true
 }
 
 function check_docker() {
@@ -37,9 +42,6 @@ function prepare_build_files() {
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
-ARG http_proxy
-ARG https_proxy
-
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl git build-essential pkg-config libssl-dev \
@@ -47,18 +49,13 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
-
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-
-WORKDIR /tmp
-RUN git clone https://github.com/nexus-xyz/nexus-cli.git
-WORKDIR /tmp/nexus-cli
-
-WORKDIR /tmp/nexus-cli/clients/cli
-RUN RUST_BACKTRACE=full cargo build --release
-
-RUN cp target/release/nexus-network /usr/local/bin/ && chmod +x /usr/local/bin/nexus-network
+RUN git clone https://github.com/nexus-xyz/nexus-cli.git /tmp/nexus-cli && \
+    cd /tmp/nexus-cli/clients/cli && \
+    RUST_BACKTRACE=full cargo build --release && \
+    cp target/release/nexus-network /usr/local/bin/ && \
+    chmod +x /usr/local/bin/nexus-network
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
@@ -69,49 +66,53 @@ cat > "$BUILD_DIR/entrypoint.sh" <<'EOF'
 #!/bin/bash
 set -e
 
-# 允许用户直接运行 nexus-network --version / --help 等命令
-if [[ "$1" == "--version" || "$1" == "--help" || "$1" == "version" || "$1" == "help" ]]; then
-    exec nexus-network "$@"
-fi
+case "$1" in
+    --version|--help|version|help)
+        exec nexus-network "$@"
+        ;;
+esac
 
-# 强制要求 NODE_ID 用于运行节点
-[ -z "$NODE_ID" ] && {
-    echo "❌ 必须设置 NODE_ID 环境变量" >&2
-    exit 1
-}
+: "${NODE_ID:?❌ 必须设置 NODE_ID 环境变量}"
+: "${MAX_THREADS:?❌ 必须设置 MAX_THREADS 环境变量}"
 
-LOG_FILE="/nexus-data/nexus-${NODE_ID}.log"
-mkdir -p /nexus-data
+LOG_DIR="/nexus-data"
+LOG_FILE="${LOG_DIR}/nexus-${NODE_ID}.log"
+mkdir -p "$LOG_DIR"
 touch "$LOG_FILE"
-echo "▶️ 正在启动节点：$NODE_ID，日志写入 $LOG_FILE"
-MAX_THREADS=${MAX_THREADS:-4}
-exec nexus-network start --node-id "$NODE_ID" --max-threads "$MAX_THREADS" 2>&1 | tee -a "$LOG_FILE"
+
+echo "▶️ 启动节点: $NODE_ID | 线程数: $MAX_THREADS | 日志文件: $LOG_FILE"
+exec nexus-network start \
+    --node-id "$NODE_ID" \
+    --max-threads "$MAX_THREADS" \
+    2>&1 | tee -a "$LOG_FILE"
 EOF
 
     chmod +x "$BUILD_DIR/entrypoint.sh"
 }
 
-# 1. 构建镜像
+# ✅ 增加镜像存在检查
 function build_image() {
     cd "$BUILD_DIR"
-    echo "🔧 开始构建 Docker 镜像（已禁用缓存）..."
+    if docker image inspect "$IMAGE_NAME" &>/dev/null; then
+        read -rp "镜像已存在，是否重新构建？[y/N] " choice
+        [[ "$choice" != [yY] ]] && return
+    fi
 
+    echo "🔧 开始构建 Docker 镜像..."
     docker build --no-cache -t "$IMAGE_NAME" . || {
         echo "❌ 镜像构建失败" >&2
         exit 1
     }
 
-    echo "✅ 镜像构建完成，正在检查 nexus-network 版本..."
-
+    echo "✅ 镜像构建完成，版本信息："
     docker run --rm --entrypoint nexus-network "$IMAGE_NAME" --version || {
-        echo "⚠️ 无法获取版本号，可能构建未成功或镜像结构有误。" >&2
+        echo "⚠️ 版本检查失败" >&2
     }
 }
 
-# 7. 更新到官方最新版
 function build_image_latest() {
     cd "$BUILD_DIR"
-    echo "🔧 正在更新到官方最新版（使用本地缓存，不重新拉取 Ubuntu 24.04）..."
+    echo "🔧 正在更新到官方最新版..."
     docker build -t "$IMAGE_NAME" . || {
         echo "❌ 镜像构建失败" >&2
         exit 1
@@ -120,8 +121,6 @@ function build_image_latest() {
     docker run --rm --entrypoint nexus-network "$IMAGE_NAME" --version
 }
 
-# 其他功能
-# 校验 node-id
 function validate_node_id() {
     [[ "$1" =~ ^[0-9]+$ ]] || {
         echo "❌ node-id 必须是数字" >&2
@@ -130,10 +129,10 @@ function validate_node_id() {
     return 0
 }
 
-# 启动多个实例
+# ✅ 使用全局启动参数
 function start_instances() {
     read -rp "请输入要创建的实例数量: " INSTANCE_COUNT
-    [[ "$INSTANCE_COUNT" =~ ^[0-9]+$ ]] || { echo "❌ 请输入有效数字" >&2; exit 1; }
+    [[ "$INSTANCE_COUNT" =~ ^[0-9]+$ ]] || { echo "❌ 请输入有效数字"; exit 1; }
 
     for i in $(seq 1 "$INSTANCE_COUNT"); do
         while true; do
@@ -141,50 +140,45 @@ function start_instances() {
             validate_node_id "$NODE_ID" && break
         done
 
-        CONTAINER_NAME="nexus-node-$i"
-        docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
-
         docker run -dit \
-            --name "$CONTAINER_NAME" \
-            --memory=2g \
-            --cpus=1 \
+            --name "nexus-node-$i" \
             -e NODE_ID="$NODE_ID" \
-            -e MAX_THREADS=1 \
             -v "$LOG_DIR":/nexus-data \
-            "$IMAGE_NAME"
-
-        echo "✅ 实例 $CONTAINER_NAME 启动成功（线程数: 1，内存限制: 2GB）"
+            "$IMAGE_NAME" \
+            start --node-id "$NODE_ID" $NEXUS_START_FLAGS
+        echo "✅ 实例 nexus-node-$i 启动成功（线程数:$DEFAULT_THREADS）"
     done
 }
 
-# 添加单个实例
 function add_one_instance() {
-    NEXT_IDX=$(docker ps -a --filter "name=nexus-node-" --format '{{.Names}}' | sed 's/nexus-node-//' | sort -n | tail -1 | awk '{print $1+1}')
-    [ -z "$NEXT_IDX" ] && NEXT_IDX=1
-
     while true; do
-        read -rp "请输入新的实例的 node-id: " NODE_ID
+        read -rp "请输入 node-id: " NODE_ID
         validate_node_id "$NODE_ID" && break
     done
 
+    NEXT_IDX=$(($(docker ps -aq --filter "name=nexus-node-" | wc -l) + 1))
     CONTAINER_NAME="nexus-node-$NEXT_IDX"
-    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+
+    if docker inspect "$CONTAINER_NAME" &>/dev/null; then
+        echo "⚠️ 容器名 $CONTAINER_NAME 已存在，自动跳过"
+        return 1
+    fi
 
     docker run -dit \
         --name "$CONTAINER_NAME" \
-        --memory=2g \
-        --cpus=1 \
         -e NODE_ID="$NODE_ID" \
-        -e MAX_THREADS=1 \
         -v "$LOG_DIR":/nexus-data \
-        "$IMAGE_NAME"
-
-    echo "✅ 新实例 $CONTAINER_NAME 启动成功（线程数: 1，内存限制: 2GB）"
+        "$IMAGE_NAME" \
+        start --node-id "$NODE_ID" $NEXUS_START_FLAGS
+    echo "✅ 实例 $CONTAINER_NAME 启动成功（线程数:$DEFAULT_THREADS）"
 }
 
-# 重启节点
 function restart_node() {
-    containers=($(docker ps --filter "name=nexus-node-" --format "{{.Names}}"))
+    containers=()
+    while IFS= read -r line; do
+        containers+=("$line")
+    done < <(docker ps --filter "name=nexus-node-" --format "{{.Names}}")
+
     if [ ${#containers[@]} -eq 0 ]; then
         echo "⚠️ 没有运行中的实例"
         sleep 2
@@ -204,37 +198,37 @@ function restart_node() {
             if [ "$choice" -le "${#containers[@]}" ]; then
                 container="${containers[$((choice-1))]}"
                 echo "🔄 正在重启 $container ..."
-                docker restart "$container"
-                echo "✅ $container 已重启"
-            else
-                echo "❌ 无效的选择"
+                if ! timeout 10s docker restart "$container"; then
+                    echo "❌ 重启超时，尝试强制停止..."
+                    docker stop -t 2 "$container" && docker start "$container"
+                fi
             fi
             ;;
         a|A)
-            echo "🔄 正在重启所有节点..."
             for container in "${containers[@]}"; do
-                docker restart "$container"
-                echo "✅ $container 已重启"
+                echo "🔄 正在重启 $container ..."
+                if ! timeout 10s docker restart "$container"; then
+                    echo "❌ $container 重启超时，尝试强制停止..."
+                    docker stop -t 2 "$container" && docker start "$container"
+                fi
             done
-            ;;
-        0)
-            return
-            ;;
-        *)
-            echo "❌ 无效的选择"
             ;;
     esac
     read -rp "按 Enter 继续..."
 }
 
-# 查看日志
+# ✅ 使用数组处理容器名
 function show_container_logs() {
+    containers=()
+    while IFS= read -r line; do
+        containers+=("$line")
+    done < <(docker ps --filter "name=nexus-node-" --format "{{.Names}}")
+
     while true; do
         clear
         echo "Nexus 节点日志查看"
         echo "--------------------------------"
 
-        containers=($(docker ps --filter "name=nexus-node-" --format "{{.Names}}"))
         if [ ${#containers[@]} -eq 0 ]; then
             echo "⚠️ 没有运行中的实例"
             sleep 2
@@ -249,60 +243,52 @@ function show_container_logs() {
 
         echo
         echo "[0] 返回主菜单"
-        echo "--------------------------------"
-        read -rp "请选择要查看的容器: " input
+        read -rp "请选择容器: " input
 
-        if [[ "$input" == "0" ]]; then
-            return
-        fi
-
-        if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1 ] && [ "$input" -le "${#containers[@]}" ]; then
-            container_name="${containers[$((input-1))]}"
-            
+        [[ "$input" == "0" ]] && return
+        [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -le "${#containers[@]}" ] && {
+            container="${containers[$((input-1))]}"
             clear
-            echo -e "\n🔍 实时监控: $container_name (Ctrl+C 停止)"
+            echo "🔍 实时日志: $container (Ctrl+C 退出)"
             echo "--------------------------------"
-            
-            trap "echo -e '\n🛑 已停止监控'; return 0" SIGINT
-            docker logs -f --tail=20 "$container_name" 2>&1
-            
+            trap "echo; return 0" SIGINT
+            docker logs -f --tail=20 "$container"
             trap - SIGINT
             read -rp "按 Enter 继续..."
-        else
-            echo "❌ 无效的容器编号"
-            sleep 1
-        fi
+        }
     done
 }
 
-# 显示菜单
+# ✅ 资源统计
 function show_menu() {
     clear
     echo "========== Nexus 节点管理 ==========="
+    echo "🖥️  系统资源：CPU $(nproc)核 | 内存: $(free -h | awk '/Mem:/{print $4}')可用"
+    echo "📦 运行实例: $(docker ps -q --filter "name=nexus-node-" | wc -l)"
     echo "📂 日志目录: $LOG_DIR"
-    echo
-    echo "📊 当前资源使用情况："
-    echo -e "容器\t\t节点ID"
+    echo "--------------------------------"
 
-    containers=$(docker ps --filter "name=nexus-node-" --format "{{.Names}}")
-    if [ -z "$containers" ]; then
-        echo "暂无实例运行"
+    containers=($(docker ps --filter "name=nexus-node-" --format "{{.Names}}"))
+    if [ ${#containers[@]} -eq 0 ]; then
+        echo "暂无运行中的实例"
     else
-        for name in $containers; do
-            NODE_ID=$(docker inspect "$name" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep NODE_ID= | cut -d= -f2)
-            printf "%-15s %-10s %-6s %-16s %s\n" "$name" "$NODE_ID"
+        echo -e "容器名称\t节点ID"
+        for name in "${containers[@]}"; do
+            node_id=$(docker inspect "$name" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep NODE_ID= | cut -d= -f2)
+            echo -e "$name\t${node_id:-未设置}"
         done
     fi
-    echo
+
+    echo "--------------------------------"
     echo "1. 构建镜像"
     echo "2. 启动多个实例"
     echo "3. 停止所有实例"
     echo "4. 查看实时日志"
     echo "5. 重启节点"
     echo "6. 添加单个实例"
-    echo "7. 更新到官方最新版（跳过初始安装步骤）"
+    echo "7. 更新到官方最新版"
     echo "0. 退出"
-    echo "======================================"
+    echo "===================================="
 }
 
 # ========== 主程序 ==========
@@ -315,7 +301,7 @@ while true; do
     case "$choice" in
         1) prepare_build_files; build_image;;
         2) start_instances;;
-        3) docker rm -f $(docker ps -aq --filter "name=nexus-node-") || true;;
+        3) docker rm -f $(docker ps -aq --filter "name=nexus-node-") 2>/dev/null || true;;
         4) show_container_logs;;
         5) restart_node;;
         6) add_one_instance ;;
