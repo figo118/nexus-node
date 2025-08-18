@@ -36,24 +36,31 @@ function check_docker() {
 }
 
 function prepare_build_files() {
-    mkdir -p "$BUILD_DIR"
+  mkdir -p "$BUILD_DIR"
 
-    cat > "$BUILD_DIR/Dockerfile" <<EOF
+  cat > "$BUILD_DIR/Dockerfile" <<'EOF'
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
+# 基础依赖
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl git build-essential pkg-config libssl-dev \
     clang libclang-dev cmake jq ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
+# 安装 rustup + 最新 nightly
+RUN curl --retry 3 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-RUN git clone https://github.com/nexus-xyz/nexus-cli.git /tmp/nexus-cli && \
-    cd /tmp/nexus-cli/clients/cli && \
-    RUST_BACKTRACE=full cargo build --release && \
+# 拉取 nexus-cli 源码
+WORKDIR /app
+RUN git clone --depth=1 https://github.com/nexus-xyz/nexus-cli.git
+
+# 构建
+WORKDIR /app/nexus-cli/clients/cli
+RUN cargo build --release && \
+    strip target/release/nexus-network && \
     cp target/release/nexus-network /usr/local/bin/ && \
     chmod +x /usr/local/bin/nexus-network
 
@@ -62,7 +69,7 @@ RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 EOF
 
-cat > "$BUILD_DIR/entrypoint.sh" <<'EOF'
+  cat > "$BUILD_DIR/entrypoint.sh" <<'EOF'
 #!/bin/bash
 set -e
 
@@ -73,7 +80,7 @@ case "$1" in
 esac
 
 : "${NODE_ID:?❌ 必须设置 NODE_ID 环境变量}"
-: "${MAX_THREADS:?❌ 必须设置 MAX_THREADS 环境变量}"
+: "${MAX_THREADS:=8}"
 
 LOG_DIR="/nexus-data"
 LOG_FILE="${LOG_DIR}/nexus-${NODE_ID}.log"
@@ -81,13 +88,15 @@ mkdir -p "$LOG_DIR"
 touch "$LOG_FILE"
 
 echo "▶️ 启动节点: $NODE_ID | 线程数: $MAX_THREADS | 日志文件: $LOG_FILE"
+
 exec nexus-network start \
     --node-id "$NODE_ID" \
     --max-threads "$MAX_THREADS" \
+    --headless \
     2>&1 | tee -a "$LOG_FILE"
 EOF
 
-    chmod +x "$BUILD_DIR/entrypoint.sh"
+  chmod +x "$BUILD_DIR/entrypoint.sh"
 }
 
 # ✅ 增加镜像存在检查
@@ -140,26 +149,45 @@ function start_instances() {
             validate_node_id "$NODE_ID" && break
         done
 
-        # ✅ 新增冲突检查
+        # ✅ 增强版冲突检查
         if docker inspect "nexus-node-$i" &>/dev/null; then
-            echo "⚠️ 容器 nexus-node-$i 已存在，正在删除..."
-            docker rm -f "nexus-node-$i"
+            read -rp "容器 nexus-node-$i 已存在，是否替换？[y/N] " choice
+            if [[ "$choice" =~ ^[yY] ]]; then
+                echo "🔄 正在移除旧容器..."
+                docker rm -f "nexus-node-$i" || {
+                    echo "❌ 容器删除失败，跳过此实例"
+                    continue
+                }
+            else
+                echo "⏩ 跳过实例 nexus-node-$i"
+                continue
+            fi
         fi
 
-        docker run -dit \
+        # 启动新实例
+        if ! docker run -dit \
             --name "nexus-node-$i" \
             -e NODE_ID="$NODE_ID" \
             -v "$LOG_DIR":/nexus-data \
             "$IMAGE_NAME" \
-            start --node-id "$NODE_ID" --max-threads 8 --headless
-        echo "✅ 实例 nexus-node-$i 启动成功"
+            start --node-id "$NODE_ID" --max-threads 8 --headless; then
+            echo "❌ 实例 nexus-node-$i 启动失败"
+            continue
+        fi
+        
+        echo "✅ 实例 nexus-node-$i 启动成功 (node-id: $NODE_ID)"
     done
 }
 
 function add_one_instance() {
-    # 自动计算下一个可用编号（避免冲突）
-    NEXT_IDX=$(($(docker ps -aq --filter "name=nexus-node-" --format "{{.Names}}" | sed 's/nexus-node-//' | sort -n | tail -1) + 1))
-    [ -z "$NEXT_IDX" ] && NEXT_IDX=1  # 若没有现存实例，从1开始
+    # 获取最大编号（兼容非数字容器名）
+    MAX_ID=$(docker ps --filter "name=nexus-node-" --format '{{.Names}}' | 
+             awk -F'-' '{if($NF ~ /^[0-9]+$/) print $NF}' | 
+             sort -n | 
+             tail -n 1)
+
+    # 计算下一个可用编号
+    NEXT_IDX=$(( ${MAX_ID:-0} + 1 ))
 
     while true; do
         read -rp "请输入 node-id (必须为数字): " NODE_ID
@@ -167,23 +195,23 @@ function add_one_instance() {
         echo "❌ node-id 必须是数字！"
     done
 
-    # 强制清理可能存在的同名容器
-    docker rm -f "nexus-node-$NEXT_IDX" 2>/dev/null || true
-
-    # 启动实例（固定线程数8和无头模式）
+    # 启动实例
     docker run -dit \
-        --name "nexus-node-$NEXT_IDX" \
+        --name "nexus-node-${NEXT_IDX}" \
         -e NODE_ID="$NODE_ID" \
         -v "$LOG_DIR":/nexus-data \
         "$IMAGE_NAME" \
         start --node-id "$NODE_ID" --max-threads 8 --headless
 
-    echo "✅ 实例 nexus-node-$NEXT_IDX 启动成功（线程数:8）"
+    echo "✅ 实例 nexus-node-${NEXT_IDX} 启动成功（线程数:8）"
 }
+
 function restart_node() {
     containers=()
     while IFS= read -r line; do
-        containers+=("$line")
+        if [[ "$line" =~ ^nexus-node-[0-9]+$ ]]; then
+            containers+=("$line")
+        fi
     done < <(docker ps --filter "name=nexus-node-" --format "{{.Names}}")
 
     if [ ${#containers[@]} -eq 0 ]; then
@@ -223,12 +251,34 @@ function restart_node() {
     esac
     read -rp "按 Enter 继续..."
 }
-
-# ✅ 使用数组处理容器名
+function calculate_uptime() {
+    local container=$1
+    local created=$(docker inspect --format '{{.Created}}' "$container")
+    local restarts=$(docker inspect --format '{{.RestartCount}}' "$container")
+    local started=$(docker inspect --format '{{.State.StartedAt}}' "$container")
+    
+    local now=$(date +%s)
+    local created_ts=$(date -d "$created" +%s)
+    local started_ts=$(date -d "$started" +%s)
+    
+    if [ "$restarts" -gt 0 ]; then
+        local prev_uptime=$((created_ts - started_ts))
+        local curr_uptime=$((now - started_ts))
+        local total_seconds=$((prev_uptime + curr_uptime))
+    else
+        local total_seconds=$((now - started_ts))
+    fi
+    
+    local hours=$((total_seconds / 3600))
+    local minutes=$(( (total_seconds % 3600) / 60 ))
+    printf "%02d时%02dm" "$hours" "$minutes"
+}
 function show_container_logs() {
     containers=()
     while IFS= read -r line; do
-        containers+=("$line")
+        if [[ "$line" =~ ^nexus-node-[0-9]+$ ]]; then
+            containers+=("$line")
+        fi
     done < <(docker ps --filter "name=nexus-node-" --format "{{.Names}}")
 
     while true; do
@@ -266,36 +316,45 @@ function show_container_logs() {
     done
 }
 
-# ✅ 资源统计
 function show_menu() {
     clear
-    echo "========== Nexus 节点管理 ==========="
-    echo "🖥️  系统资源：CPU $(nproc)核 | 内存: $(free -h | awk '/Mem:/{print $4}')可用"
-    echo "📦 运行实例: $(docker ps -q --filter "name=nexus-node-" | wc -l)"
-    echo "📂 日志目录: $LOG_DIR"
-    echo "--------------------------------"
-
-    containers=($(docker ps --filter "name=nexus-node-" --format "{{.Names}}"))
-    if [ ${#containers[@]} -eq 0 ]; then
-        echo "暂无运行中的实例"
-    else
-        echo -e "容器名称\t节点ID"
-        for name in "${containers[@]}"; do
-            node_id=$(docker inspect "$name" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep NODE_ID= | cut -d= -f2)
-            echo -e "$name\t${node_id:-未设置}"
-        done
-    fi
-
-    echo "--------------------------------"
-    echo "1. 构建镜像"
-    echo "2. 启动多个实例"
-    echo "3. 停止所有实例"
-    echo "4. 查看实时日志"
-    echo "5. 重启节点"
-    echo "6. 添加单个实例"
-    echo "7. 更新到官方最新版"
-    echo "0. 退出"
-    echo "===================================="
+    # 绿色NEXUS标题（清晰版）
+    echo -e "${GREEN}"
+    echo "  N   N  EEEEE  X   X  U   U  SSSSS"
+    echo "  NN  N  E       X X   U   U  S    "
+    echo "  N N N  EEE      X    U   U  SSSSS"
+    echo "  N  NN  E       X X   U   U      S"
+    echo "  N   N  EEEEE  X   X   UUU   SSSSS"
+    echo -e "${NC}"
+    
+    # 副标题（带行距）
+    echo -e "\n${CYAN}      ░N░E░X░U░S░ 节点管理控制台 v2.0${NC}"
+   echo -e "${BLUE}==============================================${NC}"
+    
+    # 系统资源（严格对齐）
+    printf "${YELLOW}🖥️ 系统资源 ${BLUE}CPU:${GREEN}%-2d核 ${BLUE}内存:${GREEN}%-5s${NC}\n" \
+           $(nproc) $(free -h | awk '/Mem:/{print $4}')
+    echo -e "${BLUE}---------------------------------------${NC}"
+    
+    # 节点表格（精确对齐）
+    printf "${CYAN}%-14s %-15s %-12s %-12s\n${NC}" "容器名称" "节点ID" "运行时间" "完成任务数"
+    echo -e "${BLUE}---------------------------------------${NC}"
+    
+    while read -r name; do
+        node_id=$(docker inspect $name --format '{{.Config.Env}}' | grep -o 'NODE_ID=[0-9]*' | cut -d= -f2)
+        uptime=$(calculate_uptime "$name")
+        tasks=$(grep -c "Proof submitted" "/root/nexus-node/logs/nexus-${node_id}.log" 2>/dev/null || echo 0)
+        
+        printf "${PURPLE}%-14s${NC} ${GREEN}%-11s${NC} ${YELLOW}%-9s${NC} ${RED}%-12s${NC}\n" \
+               "$name" "$node_id" "$uptime" "$tasks tasks"
+    done < <(docker ps --filter "name=nexus-node-" --format "{{.Names}}")
+    
+    # 功能菜单（7个选项）
+    echo -e "${BLUE}==============================================${NC}"
+    echo -e "${CYAN}1. 构建镜像   2. 启动实例   3. 停止所有${NC}"
+    echo -e "${CYAN}4. 实时日志   5. 重启节点   6. 添加实例${NC}"
+    echo -e "${CYAN}7. 更新版本   0. 退出${NC}"
+    echo -e "${BLUE}==============================================${NC}"
 }
 
 # ========== 主程序 ==========
